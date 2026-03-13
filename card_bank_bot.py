@@ -106,20 +106,27 @@ def format_bin_info(data: dict) -> str:
 
 def lookup_privat_name(card_number: str) -> str | None:
     """
-    Отримати ім'я власника картки ПриватБанку через публічний API.
+    Отримати ім'я власника картки ПриватБанку через API переказів.
     Повертає рядок з іменем або None.
     """
     digits = re.sub(r"\D", "", card_number)
     if len(digits) != 16:
         return None
 
-    url = "https://api.privatbank.ua/p24api/cardinfo"
-    params = {"cardnum": digits}
     try:
+        # Endpoint який використовують платіжні сервіси для показу імені
+        url = "https://api.privatbank.ua/p24api/accountCard"
+        params = {"card": digits}
         resp = requests.get(url, params=params, timeout=10)
+        logger.info("PrivatBank API status: %s, body: %s", resp.status_code, resp.text[:200])
         if resp.status_code == 200:
             data = resp.json()
-            name = data.get("name") or data.get("cardholder")
+            name = (
+                data.get("name")
+                or data.get("cardholder")
+                or data.get("firstName", "") + " " + data.get("lastName", "")
+            )
+            name = name.strip()
             return name if name else None
         return None
     except Exception as e:
