@@ -102,6 +102,31 @@ def format_bin_info(data: dict) -> str:
     return "\n".join(lines) if lines else "ℹ️ Інформація не знайдена."
 
 
+# ── PrivatBank cardholder name ────────────────────────────────────────────────
+
+def lookup_privat_name(card_number: str) -> str | None:
+    """
+    Отримати ім'я власника картки ПриватБанку через публічний API.
+    Повертає рядок з іменем або None.
+    """
+    digits = re.sub(r"\D", "", card_number)
+    if len(digits) != 16:
+        return None
+
+    url = "https://api.privatbank.ua/p24api/cardinfo"
+    params = {"cardnum": digits}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            name = data.get("name") or data.get("cardholder")
+            return name if name else None
+        return None
+    except Exception as e:
+        logger.error("PrivatBank name lookup error: %s", e)
+        return None
+
+
 # ── Handlers ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -149,6 +174,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     reply = format_bin_info(data)
+
+    # Спробувати отримати ім'я власника для карток ПриватБанку
+    bank_name = (data.get("bank") or {}).get("name", "")
+    if len(digits) == 16 and "privat" in bank_name.lower():
+        cardholder = lookup_privat_name(digits)
+        if cardholder:
+            reply += f"\n\n👤 <b>Власник:</b> {cardholder}"
+
     await update.message.reply_text(reply, parse_mode="HTML")
 
 
