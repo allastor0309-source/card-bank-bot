@@ -45,6 +45,95 @@ IBAN_LENGTHS = {
     "SC": 31, "SK": 24, "SI": 19, "ES": 24, "SE": 24, "CH": 21, "TL": 23,
     "TN": 24, "TR": 26, "UA": 29, "AE": 23, "GB": 22, "VA": 22, "VG": 24,
 }
+# ── Таблиця МФО банcodes → назва банку (Україна) ─────────────────────────────
+
+UA_MFO = {
+    "300001": "Національний банк України",
+    "300012": "Промінвестбанк",
+    "300119": "Альянс",
+    "300346": "Альфа-Банк",
+    "300465": "Ощадбанк",
+    "300506": "Перший Інвестиційний Банк",
+    "300528": "ОТП Банк",
+    "300539": "ІНГ Банк Україна",
+    "300614": "Креді Агріколь Банк",
+    "300647": "Банк Кліринговий Дім",
+    "300658": "Піреус Банк МКБ",
+    "305299": "ПриватБанк",
+    "305749": "Кредит Дніпро",
+    "305880": "Земельний Капітал",
+    "307123": "Схід",
+    "307350": "Конкорд",
+    "307770": "А-Банк",
+    "309858": "Укргазбанк",
+    "311498": "Укрексімбанк",
+    "312248": "Комінвестбанк",
+    "313009": "Мотор-Банк",
+    "313582": "Метабанк",
+    "313849": "Індустриалбанк",
+    "320984": "ПроКредит Банк",
+    "320940": "Альтбанк",
+    "321723": "БТА Банк",
+    "322001": "Монобанк (Універсал Банк)",
+    "322302": "IBOX bank",
+    "322335": "Аркада",
+    "322540": "Комерційний Індустріальний Банк",
+    "325268": "Львів",
+    "325365": "Кредобанк",
+    "325990": "Оксі Банк",
+    "328209": "Південний",
+    "328760": "Місто Банк",
+    "329138": "Укрсиббанк",
+    "331401": "ПриватБанк (Полтава)",
+    "331489": "Полтава-банк",
+    "334851": "ПУМБ",
+    "336310": "Ідея Банк",
+    "339016": "Портал",
+    "339050": "Крісталбанк",
+    "351607": "Грант",
+    "351629": "Мегабанк",
+    "353100": "Полікомбанк",
+    "353489": "Асвіо Банк",
+    "377090": "Європейський Промисловий Банк",
+    "380281": "Банк інвестицій і заощаджень",
+    "380366": "Кредит Європа Банк",
+    "380441": "Кредитвест Банк",
+    "380526": "Глобус",
+    "380548": "Агропросперис Банк",
+    "380582": "Міжнародний Інвестиційний Банк",
+    "380634": "АккордБанк",
+    "380645": "Банк 3/4",
+    "380731": "Дойче Банк ДБУ",
+    "380838": "Правекс-Банк",
+    "380894": "Альпарі Банк",
+    "380946": "Авангард",
+    "300711": "Райффайзен Банк",
+    "380805": "Сенс Банк (Альфа-Банк)",
+    "380775": "Таскомбанк",
+    "322499": "Банк Кредит Дніпро",
+    "380432": "Форвард Банк",
+    "300131": "Укрінбанк",
+    "321760": "МТБ Банк",
+    "380483": "Банк Січ",
+    "380596": "Sky Bank",
+    "380643": "БанГрант",
+    "300191": "Приватбанк філія",
+}
+
+
+def lookup_ua_bank_by_mfo(mfo_code: str) -> str | None:
+    """Повертає назву банку за кодом МФО (6 цифр)."""
+    return UA_MFO.get(mfo_code.strip().zfill(6))
+
+
+def get_ua_mfo_from_iban(iban: str) -> str | None:
+    """Витягує МФО з українського IBAN (позиції 4-9)."""
+    clean = re.sub(r"\s", "", iban).upper()
+    if clean.startswith("UA") and len(clean) >= 10:
+        return clean[4:10]
+    return None
+
+
 
 def validate_iban(iban: str) -> bool:
     """Перевірка контрольної суми IBAN (MOD-97)."""
@@ -67,23 +156,52 @@ def validate_iban(iban: str) -> bool:
     return int(numeric) % 97 == 1
 
 
-def lookup_iban(iban: str) -> dict | None:
-    """Lookup IBAN через api.iban.com (безкоштовний tier)."""
-    clean = re.sub(r"\s", "", iban).upper()
+def _iban_lookup_openiban(clean: str) -> dict | None:
+    """openiban.com — безкоштовно, без ключа. Повертає банк, BIC, місто."""
     try:
         resp = requests.get(
-            "https://api.iban.com/clients/api/ibancheck",
-            params={"iban": clean, "api_key": "free"},
+            f"https://openiban.com/validate/{clean}",
+            params={"getBIC": "true", "validateBankCode": "true"},
             timeout=10,
         )
         if resp.status_code == 200:
             d = resp.json()
-            if d.get("result") or d.get("bank_data"):
-                return d
+            if d.get("valid") and d.get("bankData"):
+                return {"_source": "openiban", **d}
     except Exception as e:
-        logger.warning("iban.com error: %s", e)
+        logger.warning("openiban error: %s", e)
+    return None
 
-    # Fallback: розбираємо вручну
+
+def _iban_lookup_apininjas(clean: str) -> dict | None:
+    """api-ninjas.com — безкоштовний tier з API ключем."""
+    api_key = os.environ.get("APININJAS_KEY", "")
+    if not api_key:
+        return None
+    try:
+        resp = requests.get(
+            "https://api.api-ninjas.com/v1/iban",
+            params={"iban": clean},
+            headers={"X-Api-Key": api_key},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            d = resp.json()
+            if d.get("bank_name") or d.get("bank_address"):
+                return {"_source": "apininjas", **d}
+    except Exception as e:
+        logger.warning("api-ninjas IBAN error: %s", e)
+    return None
+
+
+def lookup_iban(iban: str) -> dict | None:
+    """Fallback ланцюжок: openiban.com → api-ninjas."""
+    clean = re.sub(r"\s", "", iban).upper()
+    for fn in [_iban_lookup_openiban, _iban_lookup_apininjas]:
+        result = fn(clean)
+        if result:
+            logger.info("IBAN lookup success via %s", result.get("_source"))
+            return result
     return None
 
 
@@ -132,22 +250,38 @@ def format_iban_info(iban: str) -> str:
         bank_code = bban[:bank_len]
         lines.append(f"🏛 <b>Код банку:</b> {bank_code}")
 
-    # Спробувати lookup
+    # Спробувати lookup банку
     data = lookup_iban(clean)
     if data:
-        bd = data.get("bank_data") or data.get("bankData") or {}
-        bank_name = bd.get("bank") or bd.get("name") or bd.get("bankName")
-        bic       = bd.get("bic") or bd.get("swift") or bd.get("BIC")
-        city      = bd.get("city") or bd.get("zip")
-        branch    = bd.get("branch")
+        src = data.get("_source", "")
+        if src == "openiban":
+            bd = data.get("bankData") or {}
+            bank_name = bd.get("name")
+            bic       = bd.get("bic")
+            city      = bd.get("city")
+            zip_code  = bd.get("zip")
+            bank_code = bd.get("bankCode")
+        elif src == "apininjas":
+            bank_name = data.get("bank_name")
+            bic       = data.get("bic")
+            city      = data.get("city")
+            zip_code  = None
+            bank_code = data.get("bank_code")
+        else:
+            bd = data.get("bank_data") or data.get("bankData") or {}
+            bank_name = bd.get("bank") or bd.get("name")
+            bic       = bd.get("bic") or bd.get("swift")
+            city      = bd.get("city")
+            zip_code  = bd.get("zip")
+            bank_code = None
+
         if bank_name:
-            lines.append(f"🏦 <b>Банк:</b> {bank_name}")
+            lines.append(f"\n🏦 <b>Банк:</b> {bank_name}")
         if bic:
             lines.append(f"🔑 <b>BIC/SWIFT:</b> <code>{bic}</code>")
         if city:
-            lines.append(f"📍 <b>Місто:</b> {city}")
-        if branch:
-            lines.append(f"🏢 <b>Відділення:</b> {branch}")
+            loc = f"{zip_code} {city}".strip() if zip_code else city
+            lines.append(f"📍 <b>Місто:</b> {loc}")
 
     expected_len = IBAN_LENGTHS.get(country_code)
     if expected_len:
