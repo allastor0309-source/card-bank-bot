@@ -175,16 +175,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for i, digits in enumerate(card_numbers, start=1):
         data = lookup_bin(digits)
 
-        masked = digits[:6] + "••••••" + digits[-2:] if len(digits) >= 8 else digits
-
         if data is None:
             reply = (
-                f"<b>Картка {i}:</b> <code>{masked}</code>\n"
+                f"<b>Картка {i}:</b> <code>{digits}</code>\n"
                 "⚠️ Інформацію не знайдено. Перевір номер або спробуй пізніше."
             )
         else:
             bin_info = format_bin_info(data)
-            header = f"<b>Картка {i}:</b> <code>{masked}</code>\n"
+            header = f"<b>Картка {i}:</b> <code>{digits}</code>\n"
             reply = header + bin_info
 
         await update.message.reply_text(reply, parse_mode="HTML")
