@@ -243,18 +243,12 @@ def lookup_iban(iban: str) -> dict | None:
 
 
 def format_iban_info(iban: str) -> str:
-    """Форматує інформацію про IBAN."""
+    """Форматує інформацію про IBAN — компактний блок."""
     clean = re.sub(r"\s", "", iban).upper()
     country_code = clean[:2]
-    check_digits = clean[2:4]
     bban = clean[4:]
-
-    # Людський вигляд: групами по 4
     pretty = " ".join(clean[i:i+4] for i in range(0, len(clean), 4))
 
-    lines = [f"🏦 <b>IBAN:</b> <code>{pretty}</code>\n"]
-
-    # Країна
     country_names = {
         "UA": "🇺🇦 Україна", "DE": "🇩🇪 Німеччина", "PL": "🇵🇱 Польща",
         "GB": "🇬🇧 Великобританія", "FR": "🇫🇷 Франція", "IT": "🇮🇹 Італія",
@@ -269,8 +263,6 @@ def format_iban_info(iban: str) -> str:
         "GR": "🇬🇷 Греція", "IE": "🇮🇪 Ірландія", "MT": "🇲🇹 Мальта",
         "CY": "🇨🇾 Кіпр", "LI": "🇱🇮 Ліхтенштейн", "MC": "🇲🇨 Монако",
     }
-
-    # Формати BBAN для витягування коду банку
     bank_code_len = {
         "UA": 6, "DE": 8, "PL": 8, "GB": 4, "FR": 5, "IT": 5,
         "ES": 4, "NL": 4, "BE": 3, "CH": 5, "AT": 5, "SE": 3,
@@ -279,32 +271,36 @@ def format_iban_info(iban: str) -> str:
     }
 
     country_display = country_names.get(country_code, f"🌍 {country_code}")
-    lines.append(f"🌍 <b>Країна:</b> {country_display}")
-    lines.append(f"🔢 <b>Контрольні цифри:</b> {check_digits}")
+    SEP = "━━━━━━━━━━━━━━━━━"
+
+    lines = [
+        f"🏦 <b>IBAN рахунок</b>",
+        SEP,
+        f"<code>{pretty}</code>",
+        f"🌍 {country_display}  ✅ {len(clean)} символів",
+        SEP,
+    ]
 
     bank_len = bank_code_len.get(country_code)
     if bank_len:
         bank_code = bban[:bank_len]
-        lines.append(f"🏛 <b>Код банку (МФО):</b> {bank_code}")
 
-        # Для UA — шукаємо назву банку з локальної таблиці МФО
         if country_code == "UA":
             bank_name_local = lookup_ua_bank_by_mfo(bank_code)
-            if bank_name_local:
-                lines.append(f"🏦 <b>Банк:</b> {bank_name_local}")
-
-            # Тип рахунку за номером рахунку (BBAN після МФО, 5 символів далі)
             account_prefix = bban[11:15] if len(bban) >= 15 else ""
             account_type = get_ua_account_type(account_prefix)
-            if account_type:
-                lines.append(f"👤 <b>Тип рахунку:</b> {account_type}")
 
-            expected_len = IBAN_LENGTHS.get(country_code)
-            if expected_len:
-                lines.append(f"\n✅ <b>Довжина:</b> {len(clean)}/{expected_len} — коректна")
+            if bank_name_local:
+                lines.append(f"🏛 <b>{bank_name_local}</b>")
+            lines.append(f"🔢 МФО: <code>{bank_code}</code>")
+            if account_type:
+                lines.append(f"👤 {account_type}")
             return "\n".join(lines)
 
-    # Спробувати lookup банку (для не-UA або якщо МФО не знайдено)
+        else:
+            lines.append(f"🔢 Код банку: <code>{bank_code}</code>")
+
+    # Зовнішній lookup для не-UA
     data = lookup_iban(clean)
     if data:
         src = data.get("_source", "")
@@ -314,32 +310,25 @@ def format_iban_info(iban: str) -> str:
             bic       = bd.get("bic")
             city      = bd.get("city")
             zip_code  = bd.get("zip")
-            bank_code = bd.get("bankCode")
         elif src == "apininjas":
             bank_name = data.get("bank_name")
             bic       = data.get("bic")
             city      = data.get("city")
             zip_code  = None
-            bank_code = data.get("bank_code")
         else:
             bd = data.get("bank_data") or data.get("bankData") or {}
             bank_name = bd.get("bank") or bd.get("name")
             bic       = bd.get("bic") or bd.get("swift")
             city      = bd.get("city")
             zip_code  = bd.get("zip")
-            bank_code = None
 
         if bank_name:
-            lines.append(f"\n🏦 <b>Банк:</b> {bank_name}")
+            lines.append(f"🏛 <b>{bank_name}</b>")
         if bic:
-            lines.append(f"🔑 <b>BIC/SWIFT:</b> <code>{bic}</code>")
+            lines.append(f"🔑 BIC/SWIFT: <code>{bic}</code>")
         if city:
             loc = f"{zip_code} {city}".strip() if zip_code else city
-            lines.append(f"📍 <b>Місто:</b> {loc}")
-
-    expected_len = IBAN_LENGTHS.get(country_code)
-    if expected_len:
-        lines.append(f"\n✅ <b>Довжина:</b> {len(clean)}/{expected_len} цифр — коректна")
+            lines.append(f"📍 {loc}")
 
     return "\n".join(lines)
 
@@ -538,49 +527,52 @@ def _normalize(data: dict) -> dict:
 
 
 def format_bin_info(data: dict) -> str:
+    """Форматує відповідь BIN API — компактний блок."""
     n = _normalize(data)
-    lines = []
+    SEP = "━━━━━━━━━━━━━━━━━"
 
     scheme    = n.get("scheme", "").upper()
     card_type = n.get("card_type", "").capitalize()
     level     = n.get("level", "").capitalize()
-
-    if scheme:
-        lines.append(f"💳 <b>Платіжна система:</b> {scheme}")
-    if card_type:
-        lines.append(f"📋 <b>Тип картки:</b> {card_type}")
-    if level:
-        lines.append(f"🎖 <b>Рівень:</b> {level}")
-
-    bank_name  = n.get("bank_name", "")
-    bank_city  = n.get("bank_city", "")
-    bank_url   = n.get("bank_url", "")
-    bank_phone = n.get("bank_phone", "")
-
-    if bank_name:
-        lines.append(f"\n🏦 <b>Банк:</b> {bank_name}")
-    if bank_city:
-        lines.append(f"📍 <b>Місто:</b> {bank_city}")
-    if bank_url:
-        lines.append(f"🌐 <b>Сайт:</b> {bank_url}")
-    if bank_phone:
-        lines.append(f"📞 <b>Телефон:</b> {bank_phone}")
-
+    bank_name = n.get("bank_name", "")
+    bank_city = n.get("bank_city", "")
+    bank_url  = n.get("bank_url", "")
+    bank_phone= n.get("bank_phone", "")
     country_name  = n.get("country_name", "")
     country_emoji = n.get("country_emoji", "")
     currency      = n.get("currency", "")
+    prepaid       = n.get("prepaid")
 
+    # Рядок платіжної системи + тип + рівень
+    card_meta = " · ".join(filter(None, [scheme, card_type, level]))
+
+    # Рядок країни
+    country_line = ""
     if country_name:
-        flag = f" {country_emoji}" if country_emoji else ""
-        lines.append(f"\n🌍 <b>Країна:</b>{flag} {country_name}")
-    if currency:
-        lines.append(f"💰 <b>Валюта:</b> {currency}")
+        flag = f"{country_emoji} " if country_emoji else ""
+        cur  = f" · {currency}" if currency else ""
+        country_line = f"{flag}{country_name}{cur}"
 
-    prepaid = n.get("prepaid")
+    lines = ["💳 <b>Банківська картка</b>", SEP]
+
+    if card_meta:
+        lines.append(f"💠 {card_meta}")
+    if bank_name:
+        lines.append(f"🏛 <b>{bank_name}</b>")
+    if bank_city:
+        lines.append(f"📍 {bank_city}")
+    if bank_url or bank_phone:
+        contact = "  ".join(filter(None, [bank_url, bank_phone]))
+        lines.append(f"🌐 {contact}")
+
+    lines.append(SEP)
+
+    if country_line:
+        lines.append(f"🌍 {country_line}")
     if prepaid is not None:
-        lines.append(f"💵 <b>Передоплачена:</b> {'Так' if prepaid else 'Ні'}")
+        lines.append(f"💵 Передоплачена: {'Так' if prepaid else 'Ні'}")
 
-    return "\n".join(lines) if lines else "ℹ️ Інформація не знайдена."
+    return "\n".join(lines) if len(lines) > 2 else "ℹ️ Інформація не знайдена."
 
 
 # ── Card number helpers ───────────────────────────────────────────────────────
