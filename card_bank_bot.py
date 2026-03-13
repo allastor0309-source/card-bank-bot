@@ -102,36 +102,22 @@ def format_bin_info(data: dict) -> str:
     return "\n".join(lines) if lines else "ℹ️ Інформація не знайдена."
 
 
-# ── PrivatBank cardholder name ────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def lookup_privat_name(card_number: str) -> str | None:
+def extract_card_numbers(text: str) -> list[str]:
     """
-    Отримати ім'я власника картки ПриватБанку через API переказів.
-    Повертає рядок з іменем або None.
+    Витягує всі потенційні номери карток з тексту.
+    Розбиває по пробілах, комах, крапках з комою та нових рядках.
+    Повертає список рядків що містять тільки цифри (≥6 символів).
     """
-    digits = re.sub(r"\D", "", card_number)
-    if len(digits) != 16:
-        return None
-
-    try:
-        # Endpoint який використовують платіжні сервіси для показу імені
-        url = "https://api.privatbank.ua/p24api/accountCard"
-        params = {"card": digits}
-        resp = requests.get(url, params=params, timeout=10)
-        logger.info("PrivatBank API status: %s, body: %s", resp.status_code, resp.text[:200])
-        if resp.status_code == 200:
-            data = resp.json()
-            name = (
-                data.get("name")
-                or data.get("cardholder")
-                or data.get("firstName", "") + " " + data.get("lastName", "")
-            )
-            name = name.strip()
-            return name if name else None
-        return None
-    except Exception as e:
-        logger.error("PrivatBank name lookup error: %s", e)
-        return None
+    # Розбиваємо по будь-яких роздільниках: пробіл, кома, крапка з комою, новий рядок
+    tokens = re.split(r"[\s,;]+", text.strip())
+    results = []
+    for token in tokens:
+        digits = re.sub(r"\D", "", token)
+        if len(digits) >= 6:
+            results.append(digits)
+    return results
 
 
 # ── Handlers ─────────────────────────────────────────────────────────────────
@@ -139,8 +125,11 @@ def lookup_privat_name(card_number: str) -> str | None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 Привіт! Я можу визначити банк за номером картки.\n\n"
-        "Надішли мені <b>номер картки</b> (або перші 6–16 цифр) — "
-        "і я поверну інформацію про банк та платіжну систему.\n\n"
+        "Надішли мені <b>один або кілька номерів карток</b> — "
+        "через пробіл, кому або з нового рядка.\n\n"
+        "Приклад:\n"
+        "<code>4149 4996 0000 0000</code>\n"
+        "<code>5375 4141 0000 0000, 4111111111111111</code>\n\n"
         "⚠️ <i>Бот читає лише перші 8 цифр (BIN). "
         "Повний номер картки нікуди не зберігається.</i>",
         parse_mode="HTML",
@@ -150,8 +139,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "ℹ️ <b>Як користуватись:</b>\n\n"
-        "• Просто надішли номер картки або перші 6–8 цифр.\n"
-        "• Пробіли та дефіси — не проблема, я їх прибираю.\n"
+        "• Надішли один або кілька номерів карток.\n"
+        "• Роздільники: пробіл, кома, крапка з комою або новий рядок.\n"
+        "• Пробіли всередині номера — не проблема.\n"
         "• Команди: /start, /help",
         parse_mode="HTML",
     )
@@ -160,36 +150,44 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
 
-    # Витягнути лише цифри
-    digits = re.sub(r"\D", "", text)
+    card_numbers = extract_card_numbers(text)
 
-    if len(digits) < 6:
+    if not card_numbers:
         await update.message.reply_text(
-            "❌ Введи не менше 6 цифр номера картки."
+            "❌ Не знайдено жодного номера картки.\n"
+            "Введи не менше 6 цифр."
         )
         return
 
-    await update.message.reply_text("🔍 Шукаю інформацію…")
-
-    data = lookup_bin(digits)
-
-    if data is None:
+    # Обмеження — не більше 10 карток за раз
+    if len(card_numbers) > 10:
         await update.message.reply_text(
-            "⚠️ Не вдалося знайти інформацію по цьому BIN.\n"
-            "Перевір правильність номера або спробуй пізніше."
+            "⚠️ Максимум 10 карток за один запит. "
+            f"Ти надіслав {len(card_numbers)}, оброблю перші 10."
         )
-        return
+        card_numbers = card_numbers[:10]
 
-    reply = format_bin_info(data)
+    if len(card_numbers) > 1:
+        await update.message.reply_text(f"🔍 Знайдено {len(card_numbers)} карток. Шукаю…")
+    else:
+        await update.message.reply_text("🔍 Шукаю інформацію…")
 
-    # Спробувати отримати ім'я власника для карток ПриватБанку
-    bank_name = (data.get("bank") or {}).get("name", "")
-    if len(digits) == 16 and "privat" in bank_name.lower():
-        cardholder = lookup_privat_name(digits)
-        if cardholder:
-            reply += f"\n\n👤 <b>Власник:</b> {cardholder}"
+    for i, digits in enumerate(card_numbers, start=1):
+        data = lookup_bin(digits)
 
-    await update.message.reply_text(reply, parse_mode="HTML")
+        masked = digits[:6] + "••••••" + digits[-2:] if len(digits) >= 8 else digits
+
+        if data is None:
+            reply = (
+                f"<b>Картка {i}:</b> <code>{masked}</code>\n"
+                "⚠️ Інформацію не знайдено. Перевір номер або спробуй пізніше."
+            )
+        else:
+            bin_info = format_bin_info(data)
+            header = f"<b>Картка {i}:</b> <code>{masked}</code>\n"
+            reply = header + bin_info
+
+        await update.message.reply_text(reply, parse_mode="HTML")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
