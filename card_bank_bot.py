@@ -1,9 +1,7 @@
 """
-Telegram-бот для визначення банку по номеру картки.
-Fallback ланцюжок: Neutrino → moocher.io → BIN/IP Checker → Credit Card BIN Checker → binlist.net
-
-Встановлення залежностей:
-    pip install python-telegram-bot requests
+Telegram-бот для визначення банку по номеру картки або IBAN.
+Fallback ланцюжок BIN: Neutrino → moocher.io → BIN/IP Checker → CC BIN Checker → binlist.net
+IBAN: перевірка контрольної суми + lookup через api.iban.com
 
 Змінні середовища:
     BOT_TOKEN      — токен Telegram бота
@@ -14,11 +12,12 @@ import os
 import re
 import logging
 import requests
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -31,6 +30,138 @@ logger = logging.getLogger(__name__)
 
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
 
+# ── IBAN helpers ──────────────────────────────────────────────────────────────
+
+IBAN_LENGTHS = {
+    "AL": 28, "AD": 24, "AT": 20, "AZ": 28, "BH": 22, "BY": 28, "BE": 16,
+    "BA": 20, "BR": 29, "BG": 22, "CR": 22, "HR": 21, "CY": 28, "CZ": 24,
+    "DK": 18, "DO": 28, "EG": 29, "SV": 28, "EE": 20, "FO": 18, "FI": 18,
+    "FR": 27, "GE": 22, "DE": 22, "GI": 23, "GR": 27, "GL": 18, "GT": 28,
+    "HU": 28, "IS": 26, "IQ": 23, "IE": 22, "IL": 23, "IT": 27, "JO": 30,
+    "KZ": 20, "XK": 20, "KW": 30, "LV": 21, "LB": 28, "LI": 21, "LT": 20,
+    "LU": 20, "MT": 31, "MR": 27, "MU": 30, "MD": 24, "MC": 27, "ME": 22,
+    "NL": 18, "MK": 19, "NO": 15, "PK": 24, "PS": 29, "PL": 28, "PT": 25,
+    "QA": 29, "RO": 24, "LC": 32, "SM": 27, "ST": 25, "SA": 24, "RS": 22,
+    "SC": 31, "SK": 24, "SI": 19, "ES": 24, "SE": 24, "CH": 21, "TL": 23,
+    "TN": 24, "TR": 26, "UA": 29, "AE": 23, "GB": 22, "VA": 22, "VG": 24,
+}
+
+def validate_iban(iban: str) -> bool:
+    """Перевірка контрольної суми IBAN (MOD-97)."""
+    iban = re.sub(r"\s", "", iban).upper()
+    if len(iban) < 4:
+        return False
+    country = iban[:2]
+    expected_len = IBAN_LENGTHS.get(country)
+    if expected_len and len(iban) != expected_len:
+        return False
+    rearranged = iban[4:] + iban[:4]
+    numeric = ""
+    for ch in rearranged:
+        if ch.isdigit():
+            numeric += ch
+        elif ch.isalpha():
+            numeric += str(ord(ch) - ord("A") + 10)
+        else:
+            return False
+    return int(numeric) % 97 == 1
+
+
+def lookup_iban(iban: str) -> dict | None:
+    """Lookup IBAN через api.iban.com (безкоштовний tier)."""
+    clean = re.sub(r"\s", "", iban).upper()
+    try:
+        resp = requests.get(
+            "https://api.iban.com/clients/api/ibancheck",
+            params={"iban": clean, "api_key": "free"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            d = resp.json()
+            if d.get("result") or d.get("bank_data"):
+                return d
+    except Exception as e:
+        logger.warning("iban.com error: %s", e)
+
+    # Fallback: розбираємо вручну
+    return None
+
+
+def format_iban_info(iban: str) -> str:
+    """Форматує інформацію про IBAN."""
+    clean = re.sub(r"\s", "", iban).upper()
+    country_code = clean[:2]
+    check_digits = clean[2:4]
+    bban = clean[4:]
+
+    # Людський вигляд: групами по 4
+    pretty = " ".join(clean[i:i+4] for i in range(0, len(clean), 4))
+
+    lines = [f"🏦 <b>IBAN:</b> <code>{pretty}</code>\n"]
+
+    # Країна
+    country_names = {
+        "UA": "🇺🇦 Україна", "DE": "🇩🇪 Німеччина", "PL": "🇵🇱 Польща",
+        "GB": "🇬🇧 Великобританія", "FR": "🇫🇷 Франція", "IT": "🇮🇹 Італія",
+        "ES": "🇪🇸 Іспанія", "NL": "🇳🇱 Нідерланди", "BE": "🇧🇪 Бельгія",
+        "CH": "🇨🇭 Швейцарія", "AT": "🇦🇹 Австрія", "SE": "🇸🇪 Швеція",
+        "NO": "🇳🇴 Норвегія", "DK": "🇩🇰 Данія", "FI": "🇫🇮 Фінляндія",
+        "CZ": "🇨🇿 Чехія", "SK": "🇸🇰 Словаччина", "HU": "🇭🇺 Угорщина",
+        "RO": "🇷🇴 Румунія", "BG": "🇧🇬 Болгарія", "HR": "🇭🇷 Хорватія",
+        "LT": "🇱🇹 Литва", "LV": "🇱🇻 Латвія", "EE": "🇪🇪 Естонія",
+        "TR": "🇹🇷 Туреччина", "AE": "🇦🇪 ОАЕ", "SA": "🇸🇦 Саудівська Аравія",
+        "IL": "🇮🇱 Ізраїль", "LU": "🇱🇺 Люксембург", "PT": "🇵🇹 Португалія",
+        "GR": "🇬🇷 Греція", "IE": "🇮🇪 Ірландія", "MT": "🇲🇹 Мальта",
+        "CY": "🇨🇾 Кіпр", "LI": "🇱🇮 Ліхтенштейн", "MC": "🇲🇨 Монако",
+    }
+
+    # Формати BBAN для витягування коду банку
+    bank_code_len = {
+        "UA": 6, "DE": 8, "PL": 8, "GB": 4, "FR": 5, "IT": 5,
+        "ES": 4, "NL": 4, "BE": 3, "CH": 5, "AT": 5, "SE": 3,
+        "NO": 4, "DK": 4, "FI": 3, "CZ": 4, "SK": 4, "HU": 3,
+        "LT": 5, "LV": 4, "EE": 2,
+    }
+
+    country_display = country_names.get(country_code, f"🌍 {country_code}")
+    lines.append(f"🌍 <b>Країна:</b> {country_display}")
+    lines.append(f"🔢 <b>Контрольні цифри:</b> {check_digits}")
+
+    bank_len = bank_code_len.get(country_code)
+    if bank_len:
+        bank_code = bban[:bank_len]
+        lines.append(f"🏛 <b>Код банку:</b> {bank_code}")
+
+    # Спробувати lookup
+    data = lookup_iban(clean)
+    if data:
+        bd = data.get("bank_data") or data.get("bankData") or {}
+        bank_name = bd.get("bank") or bd.get("name") or bd.get("bankName")
+        bic       = bd.get("bic") or bd.get("swift") or bd.get("BIC")
+        city      = bd.get("city") or bd.get("zip")
+        branch    = bd.get("branch")
+        if bank_name:
+            lines.append(f"🏦 <b>Банк:</b> {bank_name}")
+        if bic:
+            lines.append(f"🔑 <b>BIC/SWIFT:</b> <code>{bic}</code>")
+        if city:
+            lines.append(f"📍 <b>Місто:</b> {city}")
+        if branch:
+            lines.append(f"🏢 <b>Відділення:</b> {branch}")
+
+    expected_len = IBAN_LENGTHS.get(country_code)
+    if expected_len:
+        lines.append(f"\n✅ <b>Довжина:</b> {len(clean)}/{expected_len} цифр — коректна")
+
+    return "\n".join(lines)
+
+
+def is_iban(text: str) -> bool:
+    """Визначає чи схожий рядок на IBAN."""
+    clean = re.sub(r"\s", "", text).upper()
+    return bool(re.match(r"^[A-Z]{2}\d{2}[A-Z0-9]{4,}$", clean)) and len(clean) >= 15
+
+
 # ── BIN lookup providers ──────────────────────────────────────────────────────
 
 def _rapidapi_headers(host: str) -> dict:
@@ -41,7 +172,6 @@ def _rapidapi_headers(host: str) -> dict:
 
 
 def _lookup_neutrino(bin_code: str) -> dict | None:
-    """Neutrino API — найповніша БД."""
     try:
         resp = requests.post(
             "https://neutrinoapi-bin-lookup.p.rapidapi.com/bin-lookup",
@@ -59,7 +189,6 @@ def _lookup_neutrino(bin_code: str) -> dict | None:
 
 
 def _lookup_moocher(bin_code: str) -> dict | None:
-    """moocher.io — рівень картки (Classic/Gold/Platinum)."""
     try:
         resp = requests.get(
             "https://bin-issuer-identification-number-database.p.rapidapi.com/",
@@ -77,7 +206,6 @@ def _lookup_moocher(bin_code: str) -> dict | None:
 
 
 def _lookup_bin_ip_checker(bin_code: str) -> dict | None:
-    """BIN/IP Checker."""
     try:
         resp = requests.get(
             "https://bin-ip-checker.p.rapidapi.com/",
@@ -95,7 +223,6 @@ def _lookup_bin_ip_checker(bin_code: str) -> dict | None:
 
 
 def _lookup_cc_bin_checker(bin_code: str) -> dict | None:
-    """Credit Card BIN Checker."""
     try:
         resp = requests.get(
             "https://credit-card-bin-checker-validator.p.rapidapi.com/bin",
@@ -113,7 +240,6 @@ def _lookup_cc_bin_checker(bin_code: str) -> dict | None:
 
 
 def _lookup_binlist(bin_code: str) -> dict | None:
-    """binlist.net — безкоштовний fallback."""
     try:
         resp = requests.get(
             f"https://lookup.binlist.net/{bin_code}",
@@ -128,10 +254,6 @@ def _lookup_binlist(bin_code: str) -> dict | None:
 
 
 def lookup_bin(card_number: str) -> dict | None:
-    """
-    Спробувати всі провайдери по черзі, повернути перший успішний результат.
-    Порядок: Neutrino → moocher.io → BIN/IP Checker → CC BIN Checker → binlist.net
-    """
     bin_code = re.sub(r"\D", "", card_number)[:8]
     if len(bin_code) < 6:
         return None
@@ -146,14 +268,12 @@ def lookup_bin(card_number: str) -> dict | None:
         if result:
             logger.info("BIN lookup success via %s", result.get("_source", "unknown"))
             return result
-
     return None
 
 
-# ── Normalize & Format ────────────────────────────────────────────────────────
+# ── Normalize & Format BIN ────────────────────────────────────────────────────
 
 def _normalize(data: dict) -> dict:
-    """Нормалізує відповідь різних API до єдиного формату."""
     src = data.get("_source", "binlist")
     out = {}
 
@@ -169,7 +289,6 @@ def _normalize(data: dict) -> dict:
         out["country_name"]  = data.get("country", "")
         out["country_emoji"] = data.get("country-flag", "")
         out["currency"]      = data.get("currency-code", "")
-
     elif src == "moocher":
         out["scheme"]        = data.get("scheme", "")
         out["card_type"]     = data.get("type", "")
@@ -184,7 +303,6 @@ def _normalize(data: dict) -> dict:
         out["country_name"]  = country.get("name", "") if isinstance(country, dict) else str(country)
         out["country_emoji"] = country.get("emoji", "") if isinstance(country, dict) else ""
         out["currency"]      = country.get("currency", "") if isinstance(country, dict) else ""
-
     elif src == "bin_ip_checker":
         out["scheme"]        = data.get("scheme", "")
         out["card_type"]     = data.get("type", "")
@@ -199,7 +317,6 @@ def _normalize(data: dict) -> dict:
         out["country_name"]  = country.get("name", "") if isinstance(country, dict) else str(country)
         out["country_emoji"] = country.get("flag", "") if isinstance(country, dict) else ""
         out["currency"]      = country.get("currency", "") if isinstance(country, dict) else ""
-
     elif src == "cc_bin_checker":
         bin_data = data.get("BIN") or data
         out["scheme"]        = bin_data.get("scheme", "")
@@ -215,7 +332,6 @@ def _normalize(data: dict) -> dict:
         out["country_name"]  = country.get("name", "") if isinstance(country, dict) else str(country)
         out["country_emoji"] = country.get("flag", "") if isinstance(country, dict) else ""
         out["currency"]      = country.get("currency", "") if isinstance(country, dict) else ""
-
     else:  # binlist
         out["scheme"]        = data.get("scheme", "")
         out["card_type"]     = data.get("type", "")
@@ -230,12 +346,10 @@ def _normalize(data: dict) -> dict:
         out["country_name"]  = country.get("name", "")
         out["country_emoji"] = country.get("emoji", "")
         out["currency"]      = country.get("currency", "")
-
     return out
 
 
 def format_bin_info(data: dict) -> str:
-    """Форматує відповідь BIN API у читабельний текст."""
     n = _normalize(data)
     lines = []
 
@@ -281,13 +395,9 @@ def format_bin_info(data: dict) -> str:
     return "\n".join(lines) if lines else "ℹ️ Інформація не знайдена."
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Card number helpers ───────────────────────────────────────────────────────
 
 def extract_card_numbers(text: str) -> list[str]:
-    """
-    Витягує всі потенційні номери карток з тексту.
-    Розбиває по пробілах, комах, крапках з комою та нових рядках.
-    """
     tokens = re.split(r"[\s,;]+", text.strip())
     results = []
     for token in tokens:
@@ -297,49 +407,102 @@ def extract_card_numbers(text: str) -> list[str]:
     return results
 
 
+# ── Keyboards ─────────────────────────────────────────────────────────────────
+
+def main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💳 Картка", callback_data="mode_card"),
+            InlineKeyboardButton("🏦 IBAN рахунок", callback_data="mode_iban"),
+        ]
+    ])
+
+
 # ── Handlers ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 Привіт! Я можу визначити банк за номером картки.\n\n"
-        "Надішли мені <b>один або кілька номерів карток</b> — "
-        "через пробіл, кому або з нового рядка.\n\n"
-        "Приклад:\n"
-        "<code>4149 4996 0000 0000</code>\n"
-        "<code>5375 4141 0000 0000, 4111111111111111</code>\n\n"
-        "⚠️ <i>Бот читає лише перші 8 цифр (BIN). "
-        "Повний номер картки нікуди не зберігається.</i>",
+        "👋 Привіт! Я можу визначити банк за номером картки або IBAN рахунку.\n\n"
+        "Обери тип або просто надішли номер — я визначу автоматично:",
         parse_mode="HTML",
+        reply_markup=main_keyboard(),
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "ℹ️ <b>Як користуватись:</b>\n\n"
-        "• Надішли один або кілька номерів карток.\n"
-        "• Роздільники: пробіл, кома, крапка з комою або новий рядок.\n"
-        "• Пробіли всередині номера — не проблема.\n"
-        "• Команди: /start, /help",
+        "💳 <b>Картка:</b> надішли номер картки (6–16 цифр).\n"
+        "   Можна кілька через пробіл, кому або новий рядок.\n\n"
+        "🏦 <b>IBAN:</b> надішли IBAN рахунок.\n"
+        "   Приклад: <code>UA213996220000026007233566001</code>\n\n"
+        "Або натисни кнопку нижче для підказки.\n\n"
+        "Команди: /start, /help",
         parse_mode="HTML",
+        reply_markup=main_keyboard(),
     )
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "mode_card":
+        await query.message.reply_text(
+            "💳 <b>Режим: Картка</b>\n\n"
+            "Надішли номер картки або кілька через пробіл/кому:\n"
+            "<code>4149 4996 0000 0000</code>\n"
+            "<code>5375414100000000, 4111111111111111</code>",
+            parse_mode="HTML",
+        )
+    elif query.data == "mode_iban":
+        await query.message.reply_text(
+            "🏦 <b>Режим: IBAN рахунок</b>\n\n"
+            "Надішли IBAN рахунок:\n"
+            "<code>UA213996220000026007233566001</code>\n"
+            "<code>DE89370400440532013000</code>\n\n"
+            "Я перевірю контрольну суму та визначу банк.",
+            parse_mode="HTML",
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
 
+    # Автовизначення: IBAN чи картка?
+    clean = re.sub(r"\s", "", text).upper()
+
+    if is_iban(clean):
+        # ── IBAN flow ──
+        await update.message.reply_text("🔍 Перевіряю IBAN…")
+
+        if not validate_iban(clean):
+            await update.message.reply_text(
+                "❌ <b>Невірний IBAN</b>\n\n"
+                "Контрольна сума не співпадає. Перевір правильність номера.",
+                parse_mode="HTML",
+                reply_markup=main_keyboard(),
+            )
+            return
+
+        reply = format_iban_info(clean)
+        await update.message.reply_text(reply, parse_mode="HTML", reply_markup=main_keyboard())
+        return
+
+    # ── Card flow ──
     card_numbers = extract_card_numbers(text)
 
     if not card_numbers:
         await update.message.reply_text(
-            "❌ Не знайдено жодного номера картки.\n"
-            "Введи не менше 6 цифр."
+            "❓ Не вдалось розпізнати номер картки або IBAN.\n\n"
+            "Обери тип вручну:",
+            reply_markup=main_keyboard(),
         )
         return
 
     if len(card_numbers) > 10:
         await update.message.reply_text(
-            "⚠️ Максимум 10 карток за один запит. "
-            f"Ти надіслав {len(card_numbers)}, оброблю перші 10."
+            f"⚠️ Максимум 10 карток за один запит. Оброблю перші 10 з {len(card_numbers)}."
         )
         card_numbers = card_numbers[:10]
 
@@ -350,18 +513,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     for i, digits in enumerate(card_numbers, start=1):
         data = lookup_bin(digits)
+        prefix = f"<b>Картка {i}:</b> <code>{digits}</code>\n" if len(card_numbers) > 1 else f"<code>{digits}</code>\n"
 
         if data is None:
-            reply = (
-                f"<b>Картка {i}:</b> <code>{digits}</code>\n"
-                "⚠️ Інформацію не знайдено. Перевір номер або спробуй пізніше."
-            )
+            reply = prefix + "⚠️ Інформацію не знайдено. Перевір номер або спробуй пізніше."
         else:
-            bin_info = format_bin_info(data)
-            header = f"<b>Картка {i}:</b> <code>{digits}</code>\n"
-            reply = header + bin_info
+            reply = prefix + format_bin_info(data)
 
-        await update.message.reply_text(reply, parse_mode="HTML")
+        is_last = (i == len(card_numbers))
+        await update.message.reply_text(
+            reply,
+            parse_mode="HTML",
+            reply_markup=main_keyboard() if is_last else None,
+        )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -369,18 +533,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def main() -> None:
     token = os.environ.get("BOT_TOKEN")
     if not token:
-        raise RuntimeError(
-            "Не знайдено BOT_TOKEN. "
-            "Встанови змінну середовища: export BOT_TOKEN=your_token"
-        )
+        raise RuntimeError("Не знайдено BOT_TOKEN.")
 
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Бот запущено. Натисни Ctrl+C для зупинки.")
+    logger.info("Бот запущено.")
     app.run_polling()
 
 
