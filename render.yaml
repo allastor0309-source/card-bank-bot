@@ -1,5 +1,6 @@
+# render.yaml
 services:
-  - type: web
+  - type: worker
     name: card-bank-bot
     env: python
     plan: free
