@@ -1,4 +1,8 @@
+# card_bank_bot.py
+# Повністю робоча версія для webhook на Render (Python 3.14+)
+
 import os
+import asyncio
 import logging
 from aiohttp import web
 from telegram import Update
@@ -20,7 +24,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Не знайдено BOT_TOKEN.")
 
-# Створюємо Application (без запуску polling)
+# Створюємо Application
 app = Application.builder().token(BOT_TOKEN).build()
 
 # ---- Обробники команд ----
@@ -56,43 +60,48 @@ app.add_handler(CommandHandler("help", help_command))
 app.add_handler(CallbackQueryHandler(button_handler))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# ---- aiohttp webhook сервер ----
-async def webhook(request):
-    """Обробляє POST-запити від Telegram"""
+# ---- Webhook обробник для aiohttp ----
+async def webhook_handler(request):
+    """Приймає POST-запити від Telegram"""
     try:
         data = await request.json()
-        logger.info("Отримано update: %s", data.get("update_id"))
+        logger.info("Отримано update_id: %s", data.get("update_id"))
         update = Update.de_json(data, app.bot)
         await app.process_update(update)
         return web.Response(status=200)
     except Exception as e:
-        logger.error("Помилка обробки webhook: %s", e)
-        return web.Response(status=500)
+        logger.exception("Помилка в webhook_handler: %s", e)
+        return web.Response(status=200)  # Завжди повертаємо 200, щоб уникнути повторів
 
-async def setup_webhook(app_instance, webhook_url):
-    """Встановлює webhook у Telegram"""
-    await app_instance.bot.set_webhook(webhook_url, drop_pending_updates=True)
-    logger.info("Webhook встановлено на %s", webhook_url)
+# ---- Health check для Render ----
+async def health(request):
+    return web.Response(text="OK")
 
-async def main():
-    # Отримуємо порт від Render (або 8080 за замовчуванням)
+def create_aiohttp_app():
+    """Створює aiohttp додаток з маршрутами"""
+    aiohttp_app = web.Application()
+    aiohttp_app.router.add_post("/webhook", webhook_handler)
+    aiohttp_app.router.add_get("/", health)
+    return aiohttp_app
+
+# ---- Головна асинхронна функція ----
+async def main_async():
     port = int(os.environ.get("PORT", 8080))
-    
-    # Формуємо URL webhook (автоматично підставляє ім'я вашого сервісу)
-    # Render задає змінну RENDER_EXTERNAL_HOSTNAME, якщо ні – використовуємо localhost (для тесту)
     render_hostname = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    
     if render_hostname:
         webhook_url = f"https://{render_hostname}/webhook"
     else:
-        # Для локального тестування (не на Render) – використовуйте ngrok або реальний URL
         webhook_url = f"http://localhost:{port}/webhook"
-        logger.warning("RENDER_EXTERNAL_HOSTNAME не встановлено, webhook URL = %s", webhook_url)
+        logger.warning("RENDER_EXTERNAL_HOSTNAME не встановлено, використовується локальний URL")
     
     # Встановлюємо webhook у Telegram
-    await setup_webhook(app, webhook_url)
+    await app.bot.set_webhook(webhook_url, drop_pending_updates=True)
+    logger.info("Webhook встановлено на %s", webhook_url)
     
     # Запускаємо aiohttp сервер
-    runner = web.AppRunner(web_app())
+    aiohttp_app = create_aiohttp_app()
+    runner = web.AppRunner(aiohttp_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -101,16 +110,9 @@ async def main():
     # Тримаємо сервер активним
     await asyncio.Event().wait()
 
-def web_app():
-    """Створює aiohttp додаток з маршрутом /webhook"""
-    aiohttp_app = web.Application()
-    aiohttp_app.router.add_post("/webhook", webhook)
-    # Додаємо health-check для Render (не обов'язково, але корисно)
-    async def health(request):
-        return web.Response(text="OK")
-    aiohttp_app.router.add_get("/", health)
-    return aiohttp_app
+def main():
+    """Точка входу для Render"""
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
